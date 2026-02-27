@@ -6,10 +6,11 @@ import com.example.demo.nl.converter.OperationInfo;
 import com.example.demo.nl.strategy.FunctionCallResult;
 import com.example.demo.nl.strategy.LlmStrategy;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
 import org.springframework.http.*;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
@@ -41,8 +42,14 @@ public class NlOrchestrator {
     @Autowired private List<LlmStrategy>  strategies; // Spring injects all implementations
 
     private LlmStrategy activeStrategy;
+    private volatile boolean ready = false;
 
-    @PostConstruct
+    /**
+     * Runs AFTER the embedded server is fully started and listening on the port.
+     * This avoids the chicken-and-egg problem of @PostConstruct trying to call
+     * /v3/api-docs before the HTTP server is ready.
+     */
+    @EventListener(ApplicationReadyEvent.class)
     public void init() throws Exception {
         // Pick the strategy that matches llm.provider
         activeStrategy = strategies.stream()
@@ -54,6 +61,7 @@ public class NlOrchestrator {
 
         log.info("Active LLM provider: {}", activeStrategy.providerId());
         activeStrategy.init(props.getSpecUrl());
+        ready = true;
         log.info("Orchestrator ready");
     }
 
@@ -62,6 +70,7 @@ public class NlOrchestrator {
     // ---------------------------------------------------------------
 
     public String process(String userMessage) throws Exception {
+        if (!ready) throw new IllegalStateException("Orchestrator is still initializing, please retry.");
         // Step 1 — Ask the LLM what to do
         FunctionCallResult call = activeStrategy.ask(userMessage);
 
