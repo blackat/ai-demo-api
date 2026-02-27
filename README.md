@@ -1,7 +1,27 @@
-# Demo REST API
+# Demo REST API — NL to REST via LLM
 
-A Spring Boot REST API for **Products** and **Orders** with no database (in-memory), fully documented with
-OpenAPI/Swagger, and integrated with **Gemini** for natural language → REST API invocation.
+Spring Boot REST API for Products and Orders, with natural language invocation
+via a pluggable LLM strategy (Gemini Vertex AI, Gemini Free, or Ollama).
+
+---
+
+## Architecture
+
+```
+POST /api/nl/command { "message": "show pending orders for customer 42" }
+        ↓
+NlOrchestrator
+        ↓ picks strategy based on llm.provider
+LlmStrategy (GeminiVertex | GeminiFree | Ollama)
+        ↓ sends user message + all API endpoints as tools
+LLM decides: call getOrders(customerId=42, status=pending)
+        ↓
+NlOrchestrator executes: GET /api/orders?customerId=42&status=pending
+        ↓
+LLM receives result → produces natural language response
+        ↓
+"Customer 42 has 2 pending orders: ..."
+```
 
 ---
 
@@ -9,22 +29,37 @@ OpenAPI/Swagger, and integrated with **Gemini** for natural language → REST AP
 
 - Java 17+
 - Maven 3.8+
-- Google Cloud project with Vertex AI enabled
 
 ---
 
-## Configuration
+## Configuration — choose your provider
 
 Edit `src/main/resources/application.properties`:
 
+### Option 1 — Ollama (free, local)
 ```properties
-gemini.project-id=YOUR_GOOGLE_CLOUD_PROJECT_ID
-gemini.location=us-central1
-gemini.model=gemini-1.5-pro
+llm.provider=ollama
+llm.ollama-model=llama3.1
+```
+Setup:
+```bash
+# Install from https://ollama.com, then:
+ollama pull llama3.1
 ```
 
-Also authenticate with Google Cloud before running:
+### Option 2 — Gemini Free (free tier, API key only)
+```properties
+llm.provider=gemini-free
+llm.gemini-api-key=YOUR_KEY   # https://aistudio.google.com/app/apikey
+llm.gemini-model=gemini-1.5-flash
+```
 
+### Option 3 — Gemini Vertex AI (paid, Google Cloud)
+```properties
+llm.provider=gemini-vertex
+llm.vertex-project-id=YOUR_PROJECT_ID
+```
+Setup:
 ```bash
 gcloud auth application-default login
 ```
@@ -39,84 +74,49 @@ mvn spring-boot:run
 
 ---
 
-## How It Works
+## Usage
 
+```bash
+curl -X POST http://localhost:8080/api/nl/command \
+  -H "Content-Type: application/json" \
+  -d '{"message": "show all pending orders for customer 42"}'
+
+curl -X POST http://localhost:8080/api/nl/command \
+  -d '{"message": "create an order for customer 55, product 1, quantity 3"}'
+
+curl -X POST http://localhost:8080/api/nl/command \
+  -d '{"message": "find products with laptop in the name"}'
 ```
-Startup:
-  App reads /v3/api-docs (OpenAPI spec)
-  → Converts every endpoint to a Gemini FunctionDeclaration automatically
-  → Gemini now knows about all your REST endpoints
-
-Request:
-  POST /api/nl/command { "message": "show pending orders for customer 42" }
-  → Sent to Gemini with all function declarations
-  → Gemini returns: call get_orders(customerId=42, status=pending)
-  → App executes: GET /api/orders?customerId=42&status=pending
-  → Result returned to Gemini → natural language response
-  → User gets: "Customer 42 has 2 pending orders: ..."
-```
-
----
-
-## Natural Language Endpoint
-
-```
-POST /api/nl/command
-{ "message": "your natural language instruction" }
-```
-
-**Example inputs:**
-
-- `"Show me all products"`
-- `"Find products with laptop in the name"`
-- `"Get all pending orders for customer 42"`
-- `"Create an order for customer 55, product 1, quantity 2"`
-- `"Update order 101 status to shipped"`
-- `"Delete product 3"`
-
----
-
-## Other Endpoints
-
-### Swagger UI
-
-```
-http://localhost:8080/swagger-ui.html
-```
-
-### OpenAPI JSON Spec
-
-```
-http://localhost:8080/v3/api-docs
-```
-
-### Products `/api/products`
-
-| Method | Path                       | Description       |
-|--------|----------------------------|-------------------|
-| GET    | /api/products              | Get all products  |
-| GET    | /api/products/{id}         | Get product by ID |
-| GET    | /api/products/search?name= | Search by name    |
-| POST   | /api/products              | Create a product  |
-| PUT    | /api/products/{id}         | Update a product  |
-| DELETE | /api/products/{id}         | Delete a product  |
-
-### Orders `/api/orders`
-
-| Method | Path                    | Description                                   |
-|--------|-------------------------|-----------------------------------------------|
-| GET    | /api/orders             | Get all orders (filter by customerId, status) |
-| GET    | /api/orders/{id}        | Get order by ID                               |
-| POST   | /api/orders             | Create an order                               |
-| PATCH  | /api/orders/{id}/status | Update order status                           |
-| DELETE | /api/orders/{id}        | Delete an order                               |
 
 ---
 
 ## Key Files
 
-| File                                   | Purpose                                                    |
-|----------------------------------------|------------------------------------------------------------|
-| `gemini/OpenApiToGeminiConverter.java` | Reads OpenAPI spec → generates Gemini FunctionDeclarations |
-| `gemini/GeminiOrchestrator.java`       | Calls Gemini, executes REST call, returns NL response      |
-| `gemini/NlCommandController.java`      | Exposes `POST /api/nl/command` endpoint                    |
+| File | Purpose |
+|------|---------|
+| `nl/config/LlmProperties.java` | All config for all providers in one place |
+| `nl/converter/OpenApiConverter.java` | Reads OpenAPI spec → Gemini format OR OpenAI format |
+| `nl/strategy/LlmStrategy.java` | Interface — add new providers here |
+| `nl/strategy/GeminiVertexStrategy.java` | Gemini via Vertex AI SDK |
+| `nl/strategy/GeminiFreeStrategy.java` | Gemini via REST API + API key |
+| `nl/strategy/OllamaStrategy.java` | Ollama local model |
+| `nl/NlOrchestrator.java` | Picks active strategy, executes REST calls |
+| `nl/NlController.java` | POST /api/nl/command |
+
+---
+
+## Adding a New Provider
+
+1. Implement `LlmStrategy`
+2. Annotate with `@Component` and `@ConditionalOnProperty(name="llm.provider", havingValue="your-id")`
+3. Add config fields to `LlmProperties`
+4. Set `llm.provider=your-id` in properties
+
+No other files need to change.
+
+---
+
+## Swagger UI
+```
+http://localhost:8080/swagger-ui.html
+```
